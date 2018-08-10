@@ -24,15 +24,18 @@
 #include<fstream>
 #include<chrono>
 
-#include<ros/ros.h>
+#include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
+#include "geometry_msgs/PoseStamped.h"
+#include "tf/transform_broadcaster.h"
 
-#include<opencv2/core/core.hpp>
+#include <opencv2/core/core.hpp>
 
-#include"../../../include/System.h"
+#include "../../../include/System.h"
+#include "../../../include/Converter.h"
 
 using namespace std;
 
@@ -40,6 +43,9 @@ class ImageGrabber
 {
 public:
     ImageGrabber(ORB_SLAM2::System* pSLAM):mpSLAM(pSLAM){}
+
+    ros::NodeHandle nh2;
+    ros::Publisher pose_info = nh2.advertise<geometry_msgs::PoseStamped>("orb_slam2/pose", 5);
 
     void GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const sensor_msgs::ImageConstPtr& msgD);
 
@@ -50,7 +56,7 @@ int main(int argc, char **argv)
 {
     ros::init(argc, argv, "RGBD");
     ros::start();
-
+    
     if(argc != 3)
     {
         cerr << endl << "Usage: rosrun ORB_SLAM2 RGBD path_to_vocabulary path_to_settings" << endl;        
@@ -63,10 +69,10 @@ int main(int argc, char **argv)
 
     ImageGrabber igb(&SLAM);
 
-    ros::NodeHandle nh;
+    ros::NodeHandle nh1;
 
-    message_filters::Subscriber<sensor_msgs::Image> rgb_sub(nh, "/camera/rgb/image_raw", 1);
-    message_filters::Subscriber<sensor_msgs::Image> depth_sub(nh, "camera/depth_registered/image_raw", 1);
+    message_filters::Subscriber<sensor_msgs::Image> rgb_sub(nh1, "/camera/color/image_raw", 1);
+    message_filters::Subscriber<sensor_msgs::Image> depth_sub(nh1, "/camera/depth/image_rect_raw", 1);
     typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
     message_filters::Synchronizer<sync_pol> sync(sync_pol(10), rgb_sub,depth_sub);
     sync.registerCallback(boost::bind(&ImageGrabber::GrabRGBD,&igb,_1,_2));
@@ -108,8 +114,26 @@ void ImageGrabber::GrabRGBD(const sensor_msgs::ImageConstPtr& msgRGB,const senso
         ROS_ERROR("cv_bridge exception: %s", e.what());
         return;
     }
+    
+    cv::Mat Tcw = mpSLAM->TrackRGBD(cv_ptrRGB->image,cv_ptrD->image,cv_ptrRGB->header.stamp.toSec());
+    geometry_msgs::PoseStamped pose;
+    pose.header.stamp = ros::Time::now();
+    pose.header.frame_id = "map";
+    if(Tcw.cols!=0 && Tcw.rows!=0)
+    {
+        cv::Mat Rwc = Tcw.rowRange(0,3).colRange(0,3).t();
+        cv::Mat twc = -Rwc*Tcw.rowRange(0,3).col(3);
+        vector<float> q = ORB_SLAM2::Converter::toQuaternion(Rwc);
+        tf::Transform new_transform;
+        new_transform.setOrigin(tf::Vector3(twc.at<float>(0, 0), twc.at<float>(0, 1), twc.at<float>(0, 2)));
 
-    mpSLAM->TrackRGBD(cv_ptrRGB->image,cv_ptrD->image,cv_ptrRGB->header.stamp.toSec());
+        tf::Quaternion quaternion(q[0], q[1], q[2], q[3]);
+        new_transform.setRotation(quaternion);
+
+        tf::poseTFToMsg(new_transform, pose.pose);
+
+        pose_info.publish(pose);
+    }
 }
 
 

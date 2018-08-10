@@ -29,10 +29,13 @@
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
+#include "geometry_msgs/PoseStamped.h"
+#include "tf/transform_broadcaster.h"
 
-#include<opencv2/core/core.hpp>
+#include <opencv2/core/core.hpp>
 
-#include"../../../include/System.h"
+#include "../../../include/System.h"
+#include "../../../include/Converter.h"
 
 using namespace std;
 
@@ -42,6 +45,9 @@ public:
     ImageGrabber(ORB_SLAM2::System* pSLAM):mpSLAM(pSLAM){}
 
     void GrabStereo(const sensor_msgs::ImageConstPtr& msgLeft,const sensor_msgs::ImageConstPtr& msgRight);
+
+    ros::NodeHandle nh2;
+    ros::Publisher pose_info = nh2.advertise<geometry_msgs::PoseStamped>("orb_slam2/pose", 5);
 
     ORB_SLAM2::System* mpSLAM;
     bool do_rectify;
@@ -107,10 +113,10 @@ int main(int argc, char **argv)
         cv::initUndistortRectifyMap(K_r,D_r,R_r,P_r.rowRange(0,3).colRange(0,3),cv::Size(cols_r,rows_r),CV_32F,igb.M1r,igb.M2r);
     }
 
-    ros::NodeHandle nh;
+    ros::NodeHandle nh1;
 
-    message_filters::Subscriber<sensor_msgs::Image> left_sub(nh, "/camera/left/image_raw", 1);
-    message_filters::Subscriber<sensor_msgs::Image> right_sub(nh, "camera/right/image_raw", 1);
+    message_filters::Subscriber<sensor_msgs::Image> left_sub(nh1, "/camera/left/image_raw", 1);
+    message_filters::Subscriber<sensor_msgs::Image> right_sub(nh1, "camera/right/image_raw", 1);
     typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
     message_filters::Synchronizer<sync_pol> sync(sync_pol(10), left_sub,right_sub);
     sync.registerCallback(boost::bind(&ImageGrabber::GrabStereo,&igb,_1,_2));
@@ -165,6 +171,25 @@ void ImageGrabber::GrabStereo(const sensor_msgs::ImageConstPtr& msgLeft,const se
     else
     {
         mpSLAM->TrackStereo(cv_ptrLeft->image,cv_ptrRight->image,cv_ptrLeft->header.stamp.toSec());
+    }
+    cv::Mat Tcw = mpSLAM->TrackStereo(cv_ptrLeft->image,cv_ptrRight->image,cv_ptrLeft->header.stamp.toSec());
+    geometry_msgs::PoseStamped pose;
+    pose.header.stamp = ros::Time::now();
+    pose.header.frame_id = "map";
+    if(Tcw.cols!=0 && Tcw.rows!=0)
+    {
+        cv::Mat Rwc = Tcw.rowRange(0,3).colRange(0,3).t();
+        cv::Mat twc = -Rwc*Tcw.rowRange(0,3).col(3);
+        vector<float> q = ORB_SLAM2::Converter::toQuaternion(Rwc);
+        tf::Transform new_transform;
+        new_transform.setOrigin(tf::Vector3(twc.at<float>(0, 0), twc.at<float>(0, 1), twc.at<float>(0, 2)));
+
+        tf::Quaternion quaternion(q[0], q[1], q[2], q[3]);
+        new_transform.setRotation(quaternion);
+
+        tf::poseTFToMsg(new_transform, pose.pose);
+
+        pose_info.publish(pose);
     }
 
 }
